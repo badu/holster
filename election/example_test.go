@@ -73,7 +73,7 @@ func SimpleExample(t *testing.T) {
 		// A unique identifier used to identify us in a list of peers
 		Name: "localhost:7080",
 		// Called whenever the library detects a change in leadership
-		Observer: func(leader string) {
+		OnUpdate: func(leader string) {
 			log.Printf("Current Leader: %s\n", leader)
 		},
 		// Called when the library wants to contact other peers

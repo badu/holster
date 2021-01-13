@@ -3,6 +3,7 @@ package election
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -69,7 +70,7 @@ type Config struct {
 	Name string
 
 	// Called when the leader changes
-	Observer Observer
+	OnUpdate OnUpdate
 
 	// The logger used errors and warning
 	Log logrus.FieldLogger
@@ -80,7 +81,7 @@ type Config struct {
 	SendRPC func(context.Context, string, RPCRequest, *RPCResponse) error
 }
 
-type Observer func(string)
+type OnUpdate func(string)
 
 type Node interface {
 	// Set the list of peers to be considered for the election, this list MUST
@@ -169,6 +170,11 @@ func (e *node) ReceiveRPC(req RPCRequest, resp *RPCResponse) {
 func (e *node) SetPeers(peers []string) error {
 	e.lock.Lock()
 	defer e.lock.Unlock()
+
+	if len(peers) == 0 {
+		return nil
+	}
+
 	e.peers = peers
 	return nil
 }
@@ -214,8 +220,8 @@ func (e *node) setLeader(leader string) {
 	if e.leader != leader {
 		e.log.Debugf("Set Leader (%s)", leader)
 		e.leader = leader
-		if e.conf.Observer != nil {
-			e.conf.Observer(leader)
+		if e.conf.OnUpdate != nil {
+			e.conf.OnUpdate(leader)
 		}
 	}
 }
@@ -253,7 +259,6 @@ func (e *node) Close() {
 
 func (e *node) run() {
 	for {
-		e.log.Debug("main loop")
 		select {
 		case <-e.shutdownCh:
 			e.setLeader("")
@@ -352,6 +357,7 @@ func (e *node) runCandidate() {
 			electionTimer.Stop()
 			return
 		case <-e.shutdownCh:
+			fmt.Printf("Shutdown\n")
 			return
 		}
 	}
@@ -363,7 +369,7 @@ func (e *node) runCandidate() {
 // vote for ourself.
 func (e *node) electSelf() <-chan VoteResp {
 	peers := e.GetPeers()
-	respCh := make(chan VoteResp, len(peers))
+	respCh := make(chan VoteResp, len(peers)+1)
 
 	// Increment the term
 	e.currentTerm++
@@ -426,7 +432,7 @@ func (e *node) electSelf() <-chan VoteResp {
 
 func (e *node) runLeader() {
 	quorumTicker := time.NewTicker(e.conf.LeaderQuorumTimeout)
-	heartBeatTicker := time.NewTicker(randomDuration(e.conf.HeartBeatTimeout / 10))
+	heartBeatTicker := time.NewTicker(randomDuration(e.conf.HeartBeatTimeout / 3))
 	heartBeatReplyCh := make(chan HeartBeatResp, 5_000)
 	peersLastContact := make(map[string]time.Time, len(e.GetPeers()))
 
@@ -469,14 +475,16 @@ func (e *node) runLeader() {
 				contacted++
 			}
 
-			// Verify we can contact a quorum
+			// Verify we can contact a quorum (Minus ourself)
 			quorum := e.quorumSize()
-			if contacted < quorum {
+			if contacted < (quorum - 1) {
 				e.log.Debug("failed to receive heart beats from a quorum of peers; stepping down")
 				e.state = FollowerState
-				// TODO: Perhaps we send ResetElection to what peers we can?
-				//  This would avoid having to wait for the heartbeat timeout
-				//  to start a new election.
+
+				// Inform the other peers we are stepping down
+				for _, peer := range e.GetPeers() {
+					e.sendElectionReset(peer)
+				}
 			}
 		case <-e.shutdownCh:
 			e.state = ShutdownState
@@ -546,7 +554,7 @@ func (e *node) sendElectionReset(peer string) {
 }
 
 func (e *node) processRPC(rpc RPCRequest) {
-	// TODO: Should check for state = shutdown?
+	e.log.Debugf("RPC: %#v\n", rpc)
 	switch cmd := rpc.Request.(type) {
 	case VoteReq:
 		e.handleVote(rpc, cmd)
